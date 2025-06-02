@@ -628,6 +628,27 @@ install_node_dependencies() {
         return 1
     fi
     
+    # Función para ejecutar npm con timeout
+    run_npm_with_timeout() {
+        local cmd="$1"
+        local timeout_seconds=300  # 5 minutos máximo
+        
+        log_info "Ejecutando: $cmd (timeout: ${timeout_seconds}s)"
+        
+        # Ejecutar con timeout
+        if timeout "$timeout_seconds" bash -c "$cmd"; then
+            return 0
+        else
+            local exit_code=$?
+            if [[ $exit_code -eq 124 ]]; then
+                log_error "Comando npm excedió timeout de ${timeout_seconds} segundos"
+            else
+                log_error "Comando npm falló con código: $exit_code"
+            fi
+            return 1
+        fi
+    }
+    
     # Detectar y solucionar problemas de Snap Node.js
     fix_snap_nodejs_issues() {
         local nodejs_path=$(which node 2>/dev/null || which nodejs 2>/dev/null)
@@ -664,33 +685,40 @@ install_node_dependencies() {
     # Limpiar caché npm y node_modules previos
     log_info "Limpiando instalación previa..."
     sudo -u $USER rm -rf node_modules package-lock.json 2>/dev/null || true
-    sudo -u $USER npm cache clean --force 2>/dev/null || true
+    
+    # Limpiar cache npm de forma segura
+    log_info "Limpiando cache npm..."
+    if ! sudo -u $USER npm cache clean --force 2>/dev/null; then
+        log_warning "No se pudo limpiar cache npm, continuando..."
+    fi
     
     # Configurar npm
     sudo -u $USER npm config set registry https://registry.npmjs.org/
     
-    # Método 1: Instalación estándar
+    # Método 1: Instalación estándar con timeout
     log_info "Método 1: Instalación estándar de dependencias..."
-    if sudo -u $USER npm install --production --no-optional --no-audit --no-fund; then
+    if run_npm_with_timeout "sudo -u $USER npm install --production --no-optional --no-audit --no-fund"; then
         log_success "Dependencias Node.js instaladas correctamente"
         return 0
     fi
     
     # Método 2: Sin cache para evitar problemas de Snap
     log_warning "Método 1 falló, intentando sin cache..."
-    if sudo -u $USER npm install --production --no-optional --no-audit --no-fund --cache-min 0; then
+    if run_npm_with_timeout "sudo -u $USER npm install --production --no-optional --no-audit --no-fund --cache-min 0"; then
         log_success "Dependencias instaladas sin cache"
         return 0
     fi
     
-    # Método 3: Instalación manual una por una
+    # Método 3: Instalación manual una por una con timeout
     log_warning "Método 2 falló, instalando dependencias una por una..."
     local packages=("express" "cors" "helmet" "compression")
     local all_success=true
     
     for package in "${packages[@]}"; do
-        log_info "Instalando $package..."
-        if ! sudo -u $USER npm install "$package" --production --no-optional --no-audit --no-fund; then
+        log_info "Instalando $package individualmente..."
+        if run_npm_with_timeout "sudo -u $USER npm install $package --production --no-optional --no-audit --no-fund"; then
+            log_success "$package instalado correctamente"
+        else
             log_error "Error instalando $package"
             all_success=false
         fi
@@ -706,25 +734,52 @@ install_node_dependencies() {
     log_info "Método 4: Intentando reinstalar Node.js sin Snap..."
     
     # Remover Snap Node.js problemático
-    if command -v snap >/dev/null 2>&1 && snap list | grep -q "node"; then
+    if command -v snap >/dev/null 2>&1 && snap list 2>/dev/null | grep -q "node"; then
         log_info "Removiendo Node.js de Snap..."
         snap remove node >/dev/null 2>&1 || true
+        sleep 2
     fi
+    
+    # Limpiar instalaciones previas
+    apt remove -y nodejs npm >/dev/null 2>&1 || true
+    apt autoremove -y >/dev/null 2>&1 || true
     
     # Instalar Node.js desde NodeSource
     log_info "Instalando Node.js desde NodeSource..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
-    apt install -y nodejs >/dev/null 2>&1
-    
-    # Verificar nueva instalación
-    if detect_and_fix_nodejs; then
-        log_success "Node.js reinstalado exitosamente"
-        # Reintentar instalación de dependencias
-        cd "$PROJECT_DIR"
-        if sudo -u $USER npm install --production --no-optional --no-audit --no-fund; then
-            log_success "Dependencias instaladas después de reinstalar Node.js"
-            return 0
+    if curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1; then
+        if apt install -y nodejs >/dev/null 2>&1; then
+            # Verificar nueva instalación
+            if detect_and_fix_nodejs; then
+                log_success "Node.js reinstalado exitosamente"
+                # Reintentar instalación de dependencias
+                cd "$PROJECT_DIR"
+                if run_npm_with_timeout "sudo -u $USER npm install --production --no-optional --no-audit --no-fund"; then
+                    log_success "Dependencias instaladas después de reinstalar Node.js"
+                    return 0
+                fi
+            fi
         fi
+    fi
+    
+    # Método 5: Fallback con servidor básico sin dependencias
+    log_warning "Método 4 falló, creando servidor básico..."
+    
+    # Crear node_modules básico manualmente
+    sudo -u $USER mkdir -p node_modules
+    
+    # Verificar si al menos Node.js está disponible para servidor básico
+    if command -v node >/dev/null 2>&1; then
+        log_warning "Creando servidor básico alternativo..."
+        create_fallback_server
+        
+        # Modificar el servicio systemd para usar server-basic.js
+        if [[ -f "/etc/systemd/system/http-proxy-101.service" ]]; then
+            sed -i 's|src/server.js|src/server-basic.js|g' /etc/systemd/system/http-proxy-101.service 2>/dev/null || true
+        fi
+        
+        log_warning "Servidor configurado en modo básico (sin dependencias externas)"
+        log_warning "Funcionalidad limitada pero operacional"
+        return 0
     fi
     
     log_error "CRÍTICO: No se pudieron instalar las dependencias Node.js"
@@ -1028,6 +1083,116 @@ ${GREEN}✅ Proxy HTTP 101 listo para usar!${NC}
     fi
 }
 
+# Crear servidor básico alternativo sin dependencias externas
+create_fallback_server() {
+    log_info "Creando servidor básico alternativo sin dependencias externas..."
+    
+    cat > "$PROJECT_DIR/src/server-basic.js" << 'EOF'
+const http = require('http');
+const url = require('url');
+
+// Configuración básica
+const PORT = process.env.PORT || 80;
+const HOST = process.env.HOST || '0.0.0.0';
+
+// Función para agregar headers CORS básicos
+function addCorsHeaders(res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, CONNECT');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Max-Age', '86400');
+}
+
+// Función para agregar headers de seguridad básicos
+function addSecurityHeaders(res) {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+}
+
+// Crear servidor HTTP
+const server = http.createServer((req, res) => {
+    const parsedUrl = url.parse(req.url, true);
+    const method = req.method;
+    
+    // Agregar headers
+    addCorsHeaders(res);
+    addSecurityHeaders(res);
+    
+    // Log de conexión
+    console.log(`${new Date().toISOString()} - ${method} ${req.url} - ${req.connection.remoteAddress}`);
+    
+    try {
+        // Responder según el método
+        if (method === 'OPTIONS') {
+            // Preflight CORS
+            res.writeHead(200);
+            res.end();
+        } else if (method === 'CONNECT') {
+            // HTTP CONNECT para proxy
+            res.writeHead(101, 'Switching Protocols', {
+                'Connection': 'Upgrade',
+                'Upgrade': 'TCP'
+            });
+            res.end();
+        } else {
+            // Respuesta estándar HTTP 101
+            res.writeHead(101, 'Switching Protocols', {
+                'Connection': 'Upgrade',
+                'Upgrade': 'websocket',
+                'Content-Type': 'text/plain'
+            });
+            res.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
+        }
+    } catch (error) {
+        console.error('Error manejando petición:', error);
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+    }
+});
+
+// Manejar errores del servidor
+server.on('error', (error) => {
+    console.error('Error del servidor:', error);
+    if (error.code === 'EADDRINUSE') {
+        console.error(`Puerto ${PORT} ya está en uso`);
+        process.exit(1);
+    }
+});
+
+// Manejar cierre graceful
+process.on('SIGTERM', () => {
+    console.log('Recibida señal SIGTERM, cerrando servidor...');
+    server.close(() => {
+        console.log('Servidor cerrado correctamente');
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('Recibida señal SIGINT, cerrando servidor...');
+    server.close(() => {
+        console.log('Servidor cerrado correctamente');
+        process.exit(0);
+    });
+});
+
+// Iniciar servidor
+server.listen(PORT, HOST, () => {
+    console.log(`🚀 Servidor HTTP Proxy 101 (modo básico) ejecutándose en http://${HOST}:${PORT}`);
+    console.log(`📅 Iniciado: ${new Date().toISOString()}`);
+    console.log(`🔧 Modo: Básico (sin dependencias externas)`);
+    console.log(`💡 Responde con HTTP 101 - Switching Protocols`);
+});
+EOF
+
+    # Cambiar propietario
+    chown -R $USER:$USER "$PROJECT_DIR/src/server-basic.js"
+    chmod 644 "$PROJECT_DIR/src/server-basic.js"
+    
+    log_success "Servidor básico alternativo creado en src/server-basic.js"
+}
+
 # Función principal de instalación
 main() {
     echo -e "${BLUE}
@@ -1051,6 +1216,7 @@ ${NC}"
     configure_firewall
     enable_service
     create_utility_scripts
+    create_fallback_server  # Crear servidor básico alternativo
     
     # Verificación final automática
     if verify_and_fix_installation; then
