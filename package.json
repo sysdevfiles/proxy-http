@@ -1,0 +1,47 @@
+{
+  "name": "http-proxy-101",
+  "version": "1.0.0",
+  "description": "Servidor proxy HTTP que responde con código 101 para bypass de restricciones de red",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node test/test-proxy.js",
+    "examples": "node examples/usage.js",
+    "install-service": "sudo bash scripts/proxy-http.sh",
+    "status": "systemctl status http-proxy-101",
+    "logs": "journalctl -u http-proxy-101 -f",
+    "stop": "systemctl stop http-proxy-101",
+    "restart": "systemctl restart http-proxy-101"
+  },
+  "keywords": [
+    "proxy",
+    "http",
+    "bypass",
+    "tunnel",
+    "101",
+    "ssl",
+    "https",
+    "http-injector",
+    "vpn",
+    "apn",
+    "wifi"
+  ],
+  "author": "HTTP Proxy 101",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/http-proxy-101/server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/http-proxy-101/server/issues"
+  },
+  "homepage": "https://github.com/http-proxy-101/server#readme"
+}
