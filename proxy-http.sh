@@ -491,9 +491,18 @@ copy_project_files() {
     
     log_info "Copiando archivos del proyecto..."
     
-    # Si estamos ejecutando desde wget, crear los archivos necesarios
-    if [[ ! -f "$current_dir/package.json" ]]; then
-        log_info "Creando archivos del proyecto desde template..."
+# Copiar archivos del proyecto
+copy_project_files() {
+    local current_dir=$(pwd)
+    
+    log_info "Copiando archivos del proyecto..."
+    
+    # Verificar si tenemos archivos del proyecto en el directorio actual
+    if [[ -f "$current_dir/package.json" && -f "$current_dir/src/server.js" ]]; then
+        log_info "Copiando archivos desde repositorio local..."
+        exec_command "rsync -av --exclude 'node_modules' --exclude '.git' --exclude '.venv' $current_dir/ $PROJECT_DIR/" "Copiando archivos"
+    else
+        log_info "Creando archivos del proyecto (instalación desde wget)..."
         
         # Crear estructura de directorios
         mkdir -p "$PROJECT_DIR/src"
@@ -506,14 +515,26 @@ copy_project_files() {
 {
   "name": "http-proxy-101",
   "version": "1.0.0",
-  "description": "HTTP Proxy Server with 101 responses for network bypass",
+  "description": "Servidor proxy HTTP que responde con código 101 para bypass de restricciones de red",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "test": "node test/test-proxy.js"
   },
-  "keywords": ["proxy", "http", "bypass", "101", "switching-protocols"],
+  "keywords": [
+    "proxy",
+    "http",
+    "bypass",
+    "tunnel",
+    "101",
+    "ssl",
+    "https",
+    "http-injector",
+    "vpn",
+    "apn",
+    "wifi"
+  ],
   "author": "HTTP Proxy 101",
   "license": "MIT",
   "dependencies": {
@@ -524,6 +545,9 @@ copy_project_files() {
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
 EOF
@@ -653,10 +677,7 @@ EOF
 }
 EOF
 
-        log_success "Archivos del proyecto creados desde template"
-    else
-        # Copiar archivos existentes
-        exec_command "rsync -av --exclude 'node_modules' --exclude '.git' --exclude '.venv' $current_dir/ $PROJECT_DIR/" "Copiando archivos"
+        log_success "Archivos del proyecto creados desde templates integrados"
     fi
     
     # Configurar permisos
