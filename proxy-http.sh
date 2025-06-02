@@ -26,10 +26,7 @@ log_info() {
 }
 
 log_success() {
-    echo -e# Crear archivo de servicio systemd
-create_systemd_service() {
-    # Detectar la ruta de Node.js para el servicio
-    local node_exec_path="/usr/bin/node"NC} $1"
+    echo -e "${GREEN}[OK]${NC} $1"
 }
 
 log_warning() {
@@ -53,7 +50,6 @@ exec_command() {
     else
         log_error "${description} falló"
         echo "Ver logs: tail -f /var/log/http-proxy-101-install.log"
-        show_basic_troubleshooting
         return 1
     fi
 }
