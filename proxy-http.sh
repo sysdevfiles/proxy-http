@@ -491,8 +491,173 @@ copy_project_files() {
     
     log_info "Copiando archivos del proyecto..."
     
-    # Copiar todos los archivos excepto node_modules y .git
-    exec_command "rsync -av --exclude 'node_modules' --exclude '.git' --exclude '.venv' $current_dir/ $PROJECT_DIR/" "Copiando archivos"
+    # Si estamos ejecutando desde wget, crear los archivos necesarios
+    if [[ ! -f "$current_dir/package.json" ]]; then
+        log_info "Creando archivos del proyecto desde template..."
+        
+        # Crear estructura de directorios
+        mkdir -p "$PROJECT_DIR/src"
+        mkdir -p "$PROJECT_DIR/config"
+        mkdir -p "$PROJECT_DIR/scripts"
+        mkdir -p "$PROJECT_DIR/test"
+        
+        # Crear package.json
+        cat > "$PROJECT_DIR/package.json" << 'EOF'
+{
+  "name": "http-proxy-101",
+  "version": "1.0.0",
+  "description": "HTTP Proxy Server with 101 responses for network bypass",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node test/test-proxy.js"
+  },
+  "keywords": ["proxy", "http", "bypass", "101", "switching-protocols"],
+  "author": "HTTP Proxy 101",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "compression": "^1.7.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
+EOF
+
+        # Crear server.js
+        cat > "$PROJECT_DIR/src/server.js" << 'EOF'
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
+const fs = require('fs');
+const path = require('path');
+
+const app = express();
+
+// Configuración desde archivo o variables de entorno
+const configPath = path.join(__dirname, '..', 'config', 'config.json');
+let config = {
+    port: process.env.PORT || 80,
+    host: process.env.HOST || '0.0.0.0',
+    timeout: parseInt(process.env.TIMEOUT) || 30000,
+    maxConnections: parseInt(process.env.MAX_CONNECTIONS) || 1000
+};
+
+// Cargar configuración desde archivo si existe
+if (fs.existsSync(configPath)) {
+    try {
+        const fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        config = { ...config, ...fileConfig };
+    } catch (error) {
+        console.log('⚠️ Error cargando config.json, usando defaults');
+    }
+}
+
+// Middleware de seguridad y optimización
+app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false
+}));
+app.use(cors());
+app.use(compression());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Configurar timeouts
+app.use((req, res, next) => {
+    req.setTimeout(config.timeout);
+    res.setTimeout(config.timeout);
+    next();
+});
+
+// Ruta principal - Responder con HTTP 101
+app.all('*', (req, res) => {
+    // Headers para HTTP 101 Switching Protocols
+    res.status(101);
+    res.set({
+        'Connection': 'Upgrade',
+        'Upgrade': 'websocket',
+        'Sec-WebSocket-Accept': 'dummy',
+        'Sec-WebSocket-Protocol': 'chat',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+    });
+    
+    // Log de la petición
+    const timestamp = new Date().toISOString();
+    const logEntry = `${timestamp} - ${req.method} ${req.url} - ${req.ip} - User-Agent: ${req.get('User-Agent') || 'Unknown'}`;
+    console.log(logEntry);
+    
+    // Respuesta con código 101
+    res.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
+});
+
+// Manejo de errores
+app.use((error, req, res, next) => {
+    console.error('Error:', error.message);
+    if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Configurar límites del servidor
+const server = app.listen(config.port, config.host, () => {
+    console.log(`🚀 HTTP Proxy 101 iniciado`);
+    console.log(`📡 Escuchando en ${config.host}:${config.port}`);
+    console.log(`⏱️ Timeout: ${config.timeout}ms`);
+    console.log(`🔗 Max conexiones: ${config.maxConnections}`);
+    console.log(`💾 PID: ${process.pid}`);
+});
+
+server.maxConnections = config.maxConnections;
+
+// Manejo de señales para cierre graceful
+process.on('SIGTERM', () => {
+    console.log('🔄 Cerrando servidor graciosamente...');
+    server.close(() => {
+        console.log('✅ Servidor cerrado');
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('🔄 Cerrando servidor graciosamente...');
+    server.close(() => {
+        console.log('✅ Servidor cerrado');
+        process.exit(0);
+    });
+});
+EOF
+
+        # Crear config.json
+        cat > "$PROJECT_DIR/config/config.json" << 'EOF'
+{
+    "port": 80,
+    "host": "0.0.0.0",
+    "timeout": 30000,
+    "maxConnections": 1000,
+    "security": {
+        "enableHelmet": true,
+        "enableCors": true,
+        "enableCompression": true
+    },
+    "logging": {
+        "enabled": true,
+        "level": "info"
+    }
+}
+EOF
+
+        log_success "Archivos del proyecto creados desde template"
+    else
+        # Copiar archivos existentes
+        exec_command "rsync -av --exclude 'node_modules' --exclude '.git' --exclude '.venv' $current_dir/ $PROJECT_DIR/" "Copiando archivos"
+    fi
     
     # Configurar permisos
     exec_command "chown -R $USER:$USER $PROJECT_DIR" "Configurando permisos de archivos"
@@ -510,6 +675,7 @@ copy_project_files() {
     if [[ -d "$PROJECT_DIR/scripts" ]]; then
         exec_command "chmod +x $PROJECT_DIR/scripts/*.sh" "Haciendo ejecutables los scripts de utilidad"
     fi
+}
 }
 
 # Instalar dependencias Node.js
