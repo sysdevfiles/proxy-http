@@ -628,31 +628,108 @@ install_node_dependencies() {
         return 1
     fi
     
+    # Detectar y solucionar problemas de Snap Node.js
+    fix_snap_nodejs_issues() {
+        local nodejs_path=$(which node 2>/dev/null || which nodejs 2>/dev/null)
+        
+        if [[ "$nodejs_path" == *"snap"* ]]; then
+            log_warning "Node.js detectado vía Snap, configurando npm para evitar conflictos..."
+            
+            # Crear directorio npm global seguro
+            local npm_global_dir="$PROJECT_DIR/.npm-global"
+            sudo -u $USER mkdir -p "$npm_global_dir"
+            
+            # Configurar npm para usar directorio alternativo
+            sudo -u $USER npm config set prefix "$npm_global_dir"
+            sudo -u $USER npm config set cache "$PROJECT_DIR/.npm-cache"
+            sudo -u $USER npm config set tmp "$PROJECT_DIR/.npm-tmp"
+            
+            # Limpiar configuraciones problemáticas
+            sudo -u $USER npm config delete userconfig 2>/dev/null || true
+            sudo -u $USER npm config delete globalconfig 2>/dev/null || true
+            
+            # Crear directorios necesarios
+            sudo -u $USER mkdir -p "$PROJECT_DIR/.npm-cache"
+            sudo -u $USER mkdir -p "$PROJECT_DIR/.npm-tmp"
+            
+            log_success "Configuración npm para Snap completada"
+            return 0
+        fi
+        return 1
+    }
+    
+    # Aplicar correcciones si es necesario
+    fix_snap_nodejs_issues
+    
     # Limpiar caché npm y node_modules previos
     log_info "Limpiando instalación previa..."
     sudo -u $USER rm -rf node_modules package-lock.json 2>/dev/null || true
     sudo -u $USER npm cache clean --force 2>/dev/null || true
     
-    # Configurar npm para el usuario proxy
+    # Configurar npm
     sudo -u $USER npm config set registry https://registry.npmjs.org/
-    sudo -u $USER npm config set prefix "$PROJECT_DIR/.npm-global"
     
-    # Instalar dependencias con configuración explícita
+    # Método 1: Instalación estándar
+    log_info "Método 1: Instalación estándar de dependencias..."
     if sudo -u $USER npm install --production --no-optional --no-audit --no-fund; then
         log_success "Dependencias Node.js instaladas correctamente"
-    else
-        log_error "Error instalando dependencias npm"
-        log_info "Intentando instalación alternativa..."
-        
-        # Método alternativo: instalar una por una
-        sudo -u $USER npm install express cors helmet compression --production --no-optional
-        if [[ $? -eq 0 ]]; then
-            log_success "Dependencias instaladas con método alternativo"
-        else
-            log_error "Falló instalación de dependencias npm"
-            return 1
+        return 0
+    fi
+    
+    # Método 2: Sin cache para evitar problemas de Snap
+    log_warning "Método 1 falló, intentando sin cache..."
+    if sudo -u $USER npm install --production --no-optional --no-audit --no-fund --cache-min 0; then
+        log_success "Dependencias instaladas sin cache"
+        return 0
+    fi
+    
+    # Método 3: Instalación manual una por una
+    log_warning "Método 2 falló, instalando dependencias una por una..."
+    local packages=("express" "cors" "helmet" "compression")
+    local all_success=true
+    
+    for package in "${packages[@]}"; do
+        log_info "Instalando $package..."
+        if ! sudo -u $USER npm install "$package" --production --no-optional --no-audit --no-fund; then
+            log_error "Error instalando $package"
+            all_success=false
+        fi
+    done
+    
+    if $all_success; then
+        log_success "Todas las dependencias instaladas individualmente"
+        return 0
+    fi
+    
+    # Método 4: Último recurso - usar Node.js de sistema sin Snap
+    log_error "Todos los métodos npm fallaron"
+    log_info "Método 4: Intentando reinstalar Node.js sin Snap..."
+    
+    # Remover Snap Node.js problemático
+    if command -v snap >/dev/null 2>&1 && snap list | grep -q "node"; then
+        log_info "Removiendo Node.js de Snap..."
+        snap remove node >/dev/null 2>&1 || true
+    fi
+    
+    # Instalar Node.js desde NodeSource
+    log_info "Instalando Node.js desde NodeSource..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
+    apt install -y nodejs >/dev/null 2>&1
+    
+    # Verificar nueva instalación
+    if detect_and_fix_nodejs; then
+        log_success "Node.js reinstalado exitosamente"
+        # Reintentar instalación de dependencias
+        cd "$PROJECT_DIR"
+        if sudo -u $USER npm install --production --no-optional --no-audit --no-fund; then
+            log_success "Dependencias instaladas después de reinstalar Node.js"
+            return 0
         fi
     fi
+    
+    log_error "CRÍTICO: No se pudieron instalar las dependencias Node.js"
+    log_error "El servidor proxy podría no funcionar correctamente"
+    return 1
 }
 
 # Verificar y auto-reparar instalación completa
