@@ -48,8 +48,7 @@ exec_command() {
     if eval "$command" > /dev/null 2>&1; then
         log_success "${description} completado"
     else
-        log_error "Error en ${description}"
-        exit 1
+        handle_error "Error en ${description}"
     fi
 }
 
@@ -106,7 +105,7 @@ install_nodejs() {
     # Verificar si Node.js ya está instalado
     if command -v node >/dev/null 2>&1; then
         local node_version=$(node --version 2>/dev/null)
-        if [[ $node_version == v18.* ]]; then
+        if [[ $node_version == v18.* ]] || [[ $node_version == v16.* ]] || [[ $node_version == v20.* ]]; then
             log_success "Node.js ya está instalado: $node_version"
             return
         fi
@@ -114,18 +113,93 @@ install_nodejs() {
 
     log_info "Instalando Node.js LTS..."
     
+    # Método 1: NodeSource (preferido)
+    if install_nodejs_nodesource; then
+        return
+    fi
+    
+    # Método 2: Snap (alternativo)
+    log_warning "NodeSource falló, intentando con snap..."
+    if install_nodejs_snap; then
+        return
+    fi
+    
+    # Método 3: Repositorio Ubuntu (última opción)
+    log_warning "Snap falló, intentando repositorio Ubuntu..."
+    if install_nodejs_ubuntu; then
+        return
+    fi
+    
+    log_error "Error: No se pudo instalar Node.js con ningún método"
+    exit 1
+}
+
+# Instalar Node.js vía NodeSource
+install_nodejs_nodesource() {
+    log_info "Intentando instalación vía NodeSource..."
+    
+    # Limpiar instalaciones previas
+    apt remove -y nodejs npm >/dev/null 2>&1 || true
+    
     # Agregar repositorio NodeSource
-    exec_command "curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -" "Agregando repositorio NodeSource"
+    if curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - >/dev/null 2>&1; then
+        log_success "Repositorio NodeSource agregado"
+    else
+        log_error "Error agregando repositorio NodeSource"
+        return 1
+    fi
     
     # Instalar Node.js
-    exec_command "apt install -y nodejs" "Instalando Node.js"
+    if apt install -y nodejs >/dev/null 2>&1; then
+        local installed_version=$(node --version 2>/dev/null)
+        log_success "Node.js instalado vía NodeSource: $installed_version"
+        
+        # Actualizar npm
+        npm install -g npm@latest >/dev/null 2>&1 || true
+        return 0
+    else
+        log_error "Error instalando Node.js vía NodeSource"
+        return 1
+    fi
+}
+
+# Instalar Node.js vía Snap
+install_nodejs_snap() {
+    log_info "Intentando instalación vía Snap..."
     
-    # Verificar instalación
-    local installed_version=$(node --version)
-    log_success "Node.js instalado: $installed_version"
+    # Instalar snapd si no está
+    apt install -y snapd >/dev/null 2>&1 || true
     
-    # Actualizar npm
-    exec_command "npm install -g npm@latest" "Actualizando npm"
+    # Instalar Node.js vía snap
+    if snap install node --classic >/dev/null 2>&1; then
+        local installed_version=$(node --version 2>/dev/null)
+        log_success "Node.js instalado vía Snap: $installed_version"
+        return 0
+    else
+        log_error "Error instalando Node.js vía Snap"
+        return 1
+    fi
+}
+
+# Instalar Node.js vía repositorio Ubuntu
+install_nodejs_ubuntu() {
+    log_info "Intentando instalación vía repositorio Ubuntu..."
+    
+    # Actualizar repositorios
+    apt update >/dev/null 2>&1 || true
+    
+    # Instalar Node.js y npm del repositorio Ubuntu
+    if apt install -y nodejs npm >/dev/null 2>&1; then
+        local installed_version=$(node --version 2>/dev/null)
+        log_success "Node.js instalado vía Ubuntu: $installed_version"
+        
+        # Actualizar npm
+        npm install -g npm@latest >/dev/null 2>&1 || true
+        return 0
+    else
+        log_error "Error instalando Node.js vía repositorio Ubuntu"
+        return 1
+    fi
 }
 
 # Crear usuario del sistema
@@ -299,46 +373,54 @@ EOF
     log_success "Scripts de utilidad creados"
 }
 
-# Mostrar información final
-show_final_info() {
-    echo -e "${GREEN}
+# Función de diagnóstico en caso de error
+run_diagnostics() {
+    echo -e "${YELLOW}
 ╔══════════════════════════════════════════════════════════════╗
-║                    🚀 INSTALACIÓN COMPLETADA                 ║
-╚══════════════════════════════════════════════════════════════╝${NC}
+║                   🔍 EJECUTANDO DIAGNÓSTICO                  ║
+╚══════════════════════════════════════════════════════════════╝${NC}"
 
-📋 Información del servicio:
-   • Nombre: $SERVICE_NAME
-   • Usuario: $USER
-   • Directorio: $PROJECT_DIR
-   • Puerto: 80 (HTTP)
+    echo ""
+    log_info "Recopilando información del sistema..."
+    
+    echo "📋 Sistema: $(lsb_release -d 2>/dev/null | cut -f2 || echo 'Ubuntu')"
+    echo "🔧 Arquitectura: $(uname -m)"
+    echo "💾 Espacio libre: $(df -h / | awk 'NR==2 {print $4}')"
+    echo ""
+    
+    # Verificar Node.js
+    if command -v node >/dev/null 2>&1; then
+        echo "📦 Node.js: $(node --version) ✅"
+    else
+        echo "📦 Node.js: No instalado ❌"
+    fi
+    
+    # Verificar puertos
+    if netstat -tulpn 2>/dev/null | grep -q ":80 "; then
+        echo "🔌 Puerto 80: En uso ⚠️"
+        echo "   Proceso usando puerto 80:"
+        netstat -tulpn | grep ":80 " | head -3
+    else
+        echo "🔌 Puerto 80: Disponible ✅"
+    fi
+    
+    echo ""
+    echo -e "${YELLOW}💡 Soluciones sugeridas:${NC}"
+    echo "1. Reinstalar Node.js: sudo apt remove nodejs npm && curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo bash - && sudo apt install nodejs"
+    echo "2. Liberar puerto 80: sudo systemctl stop apache2 nginx; sudo pkill -f :80"
+    echo "3. Actualizar sistema: sudo apt update && sudo apt upgrade -y"
+    echo ""
+}
 
-🔧 Comandos útiles:
-   • Estado: systemctl status $SERVICE_NAME
-   • Logs: journalctl -u $SERVICE_NAME -f
-   • Reiniciar: systemctl restart $SERVICE_NAME
-   • Detener: systemctl stop $SERVICE_NAME
-
-📁 Scripts de utilidad:
-   • $PROJECT_DIR/scripts/status.sh
-   • $PROJECT_DIR/scripts/restart.sh
-   • $PROJECT_DIR/scripts/logs.sh
-
-🌐 Acceso al proxy:
-   • HTTP: http://TU_IP_SERVIDOR:80
-   • Configurar en aplicaciones como proxy HTTP
-
-🔥 Firewall configurado:
-   • Puerto 22 (SSH): Permitido
-   • Puerto 80 (HTTP): Permitido
-   • Puerto 443 (HTTPS): Permitido
-
-${YELLOW}⚠️  Notas importantes:
-   • Asegúrate de que el puerto 80 esté disponible
-   • Configura tu dominio/DNS si es necesario
-   • Revisa los logs si hay problemas: journalctl -u $SERVICE_NAME${NC}
-
-${GREEN}✅ HTTP Proxy 101 está listo para usar!${NC}
-"
+# Manejar errores con diagnóstico automático
+handle_error() {
+    local error_msg="$1"
+    log_error "$error_msg"
+    echo ""
+    run_diagnostics
+    echo ""
+    log_error "Instalación fallida. Revisa el diagnóstico anterior."
+    exit 1
 }
 
 # Función principal de instalación

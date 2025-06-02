@@ -52,6 +52,26 @@ https://github.com/sysdevfiles/proxy-http/
 - ✅ URLs correctas en toda la documentación
 - ✅ Comandos wget listos para usar
 
+## 🆘 Si la instalación falla
+
+### Diagnóstico automático:
+```bash
+wget https://raw.githubusercontent.com/sysdevfiles/proxy-http/main/diagnostico.sh
+chmod +x diagnostico.sh && sudo ./diagnostico.sh
+```
+
+### Instalación manual (método alternativo):
+```bash
+wget https://raw.githubusercontent.com/sysdevfiles/proxy-http/main/manual-install.sh
+chmod +x manual-install.sh && sudo ./manual-install.sh
+```
+
+### Guía completa de solución de problemas:
+```bash
+wget https://raw.githubusercontent.com/sysdevfiles/proxy-http/main/TROUBLESHOOTING.md
+cat TROUBLESHOOTING.md
+```
+
 ## 🚀 Pasos para activar
 
 1. Subir el proyecto a: `https://github.com/sysdevfiles/proxy-http`
