@@ -501,7 +501,20 @@ copy_project_files() {
     
     # Configurar permisos
     exec_command "chown -R $USER:$USER $PROJECT_DIR" "Configurando permisos de archivos"
-    exec_command "chmod +x $PROJECT_DIR/scripts/proxy-http.sh" "Haciendo ejecutable el instalador"
+    
+    # Solo hacer ejecutable si el archivo existe
+    if [[ -f "$PROJECT_DIR/proxy-http.sh" ]]; then
+        exec_command "chmod +x $PROJECT_DIR/proxy-http.sh" "Haciendo ejecutable el instalador principal"
+    fi
+    
+    if [[ -f "$PROJECT_DIR/scripts/proxy-http.sh" ]]; then
+        exec_command "chmod +x $PROJECT_DIR/scripts/proxy-http.sh" "Haciendo ejecutable el instalador en scripts"
+    fi
+    
+    # Hacer ejecutables todos los scripts en la carpeta scripts
+    if [[ -d "$PROJECT_DIR/scripts" ]]; then
+        exec_command "chmod +x $PROJECT_DIR/scripts/*.sh" "Haciendo ejecutables los scripts de utilidad"
+    fi
 }
 
 # Crear entorno virtual Python
