@@ -487,31 +487,16 @@ create_project_directory() {
 
 # Copiar archivos del proyecto
 copy_project_files() {
-    local current_dir=$(pwd)
+    log_info "Instalando archivos del proyecto..."
     
-    log_info "Copiando archivos del proyecto..."
+    # Crear estructura de directorios
+    mkdir -p "$PROJECT_DIR/src"
+    mkdir -p "$PROJECT_DIR/config" 
+    mkdir -p "$PROJECT_DIR/scripts"
+    mkdir -p "$PROJECT_DIR/test"
     
-# Copiar archivos del proyecto
-copy_project_files() {
-    local current_dir=$(pwd)
-    
-    log_info "Copiando archivos del proyecto..."
-    
-    # Verificar si tenemos archivos del proyecto en el directorio actual
-    if [[ -f "$current_dir/package.json" && -f "$current_dir/src/server.js" ]]; then
-        log_info "Copiando archivos desde repositorio local..."
-        exec_command "rsync -av --exclude 'node_modules' --exclude '.git' --exclude '.venv' $current_dir/ $PROJECT_DIR/" "Copiando archivos"
-    else
-        log_info "Creando archivos del proyecto (instalación desde wget)..."
-        
-        # Crear estructura de directorios
-        mkdir -p "$PROJECT_DIR/src"
-        mkdir -p "$PROJECT_DIR/config"
-        mkdir -p "$PROJECT_DIR/scripts"
-        mkdir -p "$PROJECT_DIR/test"
-        
-        # Crear package.json
-        cat > "$PROJECT_DIR/package.json" << 'EOF'
+    log_info "Creando package.json..."
+    cat > "$PROJECT_DIR/package.json" << 'EOF'
 {
   "name": "http-proxy-101",
   "version": "1.0.0",
@@ -524,16 +509,14 @@ copy_project_files() {
   },
   "keywords": [
     "proxy",
-    "http",
+    "http", 
     "bypass",
     "tunnel",
     "101",
     "ssl",
     "https",
     "http-injector",
-    "vpn",
-    "apn",
-    "wifi"
+    "vpn"
   ],
   "author": "HTTP Proxy 101",
   "license": "MIT",
@@ -552,35 +535,16 @@ copy_project_files() {
 }
 EOF
 
-        # Crear server.js
-        cat > "$PROJECT_DIR/src/server.js" << 'EOF'
+    log_info "Creando server.js..."
+    cat > "$PROJECT_DIR/src/server.js" << 'EOF'
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
-
-// Configuración desde archivo o variables de entorno
-const configPath = path.join(__dirname, '..', 'config', 'config.json');
-let config = {
-    port: process.env.PORT || 80,
-    host: process.env.HOST || '0.0.0.0',
-    timeout: parseInt(process.env.TIMEOUT) || 30000,
-    maxConnections: parseInt(process.env.MAX_CONNECTIONS) || 1000
-};
-
-// Cargar configuración desde archivo si existe
-if (fs.existsSync(configPath)) {
-    try {
-        const fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-        config = { ...config, ...fileConfig };
-    } catch (error) {
-        console.log('⚠️ Error cargando config.json, usando defaults');
-    }
-}
+const PORT = process.env.PORT || 80;
+const HOST = process.env.HOST || '0.0.0.0';
 
 // Middleware de seguridad y optimización
 app.use(helmet({
@@ -590,14 +554,6 @@ app.use(helmet({
 app.use(cors());
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Configurar timeouts
-app.use((req, res, next) => {
-    req.setTimeout(config.timeout);
-    res.setTimeout(config.timeout);
-    next();
-});
 
 // Ruta principal - Responder con HTTP 101
 app.all('*', (req, res) => {
@@ -614,43 +570,21 @@ app.all('*', (req, res) => {
     
     // Log de la petición
     const timestamp = new Date().toISOString();
-    const logEntry = `${timestamp} - ${req.method} ${req.url} - ${req.ip} - User-Agent: ${req.get('User-Agent') || 'Unknown'}`;
-    console.log(logEntry);
+    console.log(`${timestamp} - ${req.method} ${req.url} - ${req.ip}`);
     
     // Respuesta con código 101
     res.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
 });
 
-// Manejo de errores
-app.use((error, req, res, next) => {
-    console.error('Error:', error.message);
-    if (!res.headersSent) {
-        res.status(500).json({ error: 'Internal Server Error' });
-    }
-});
-
-// Configurar límites del servidor
-const server = app.listen(config.port, config.host, () => {
-    console.log(`🚀 HTTP Proxy 101 iniciado`);
-    console.log(`📡 Escuchando en ${config.host}:${config.port}`);
-    console.log(`⏱️ Timeout: ${config.timeout}ms`);
-    console.log(`🔗 Max conexiones: ${config.maxConnections}`);
+// Iniciar servidor
+const server = app.listen(PORT, HOST, () => {
+    console.log(`🚀 HTTP Proxy 101 iniciado en ${HOST}:${PORT}`);
     console.log(`💾 PID: ${process.pid}`);
 });
 
-server.maxConnections = config.maxConnections;
-
 // Manejo de señales para cierre graceful
 process.on('SIGTERM', () => {
-    console.log('🔄 Cerrando servidor graciosamente...');
-    server.close(() => {
-        console.log('✅ Servidor cerrado');
-        process.exit(0);
-    });
-});
-
-process.on('SIGINT', () => {
-    console.log('🔄 Cerrando servidor graciosamente...');
+    console.log('🔄 Cerrando servidor...');
     server.close(() => {
         console.log('✅ Servidor cerrado');
         process.exit(0);
@@ -658,45 +592,28 @@ process.on('SIGINT', () => {
 });
 EOF
 
-        # Crear config.json
-        cat > "$PROJECT_DIR/config/config.json" << 'EOF'
+    log_info "Creando config.json..."
+    cat > "$PROJECT_DIR/config/config.json" << 'EOF'
 {
     "port": 80,
     "host": "0.0.0.0",
     "timeout": 30000,
-    "maxConnections": 1000,
-    "security": {
-        "enableHelmet": true,
-        "enableCors": true,
-        "enableCompression": true
-    },
-    "logging": {
-        "enabled": true,
-        "level": "info"
-    }
+    "maxConnections": 1000
 }
 EOF
 
-        log_success "Archivos del proyecto creados desde templates integrados"
-    fi
-    
     # Configurar permisos
-    exec_command "chown -R $USER:$USER $PROJECT_DIR" "Configurando permisos de archivos"
+    chown -R $USER:$USER "$PROJECT_DIR"
     
-    # Solo hacer ejecutable si el archivo existe
-    if [[ -f "$PROJECT_DIR/proxy-http.sh" ]]; then
-        exec_command "chmod +x $PROJECT_DIR/proxy-http.sh" "Haciendo ejecutable el instalador principal"
-    fi
+    log_success "Archivos del proyecto creados correctamente"
     
-    if [[ -f "$PROJECT_DIR/scripts/proxy-http.sh" ]]; then
-        exec_command "chmod +x $PROJECT_DIR/scripts/proxy-http.sh" "Haciendo ejecutable el instalador en scripts"
+    # Verificar que package.json existe
+    if [[ -f "$PROJECT_DIR/package.json" ]]; then
+        log_success "package.json verificado en $PROJECT_DIR"
+    else
+        log_error "package.json no se creó correctamente"
+        return 1
     fi
-    
-    # Hacer ejecutables todos los scripts en la carpeta scripts
-    if [[ -d "$PROJECT_DIR/scripts" ]]; then
-        exec_command "chmod +x $PROJECT_DIR/scripts/*.sh" "Haciendo ejecutables los scripts de utilidad"
-    fi
-}
 }
 
 # Instalar dependencias Node.js
