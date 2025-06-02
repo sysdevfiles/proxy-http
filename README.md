@@ -7,10 +7,10 @@ Compatible con HTTP Injector, OpenVPN y otras herramientas de túnel.
 ## ⚡ Instalación Rápida (Ubuntu VPS)
 
 ```bash
-wget --no-cache https://raw.githubusercontent.com/sysdevfiles/proxy-http/main/proxy-http.sh -O proxy-http.sh && chmod +x proxy-http.sh && sudo bash proxy-http.sh && rm proxy-http.sh
+curl -fsSL https://raw.githubusercontent.com/sysdevfiles/proxy-http/main/proxy-http.sh | sudo bash
 ```
 
-**¡Eso es todo!** El instalador detecta y corrige automáticamente cualquier problema con Node.js y puerto 80.
+**¡Eso es todo!** El instalador detecta y corrige automáticamente cualquier problema con Node.js y puertos.
 
 ## ✨ Características
 

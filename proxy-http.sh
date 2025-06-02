@@ -12,7 +12,6 @@ PROJECT_DIR="/opt/${PROJECT_NAME}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 USER="proxy"
 NODE_VERSION="20"
-VENV_PATH="${PROJECT_DIR}/.venv"
 
 # Colores para output
 RED='\033[0;31m'
@@ -27,7 +26,10 @@ log_info() {
 }
 
 log_success() {
-    echo -e "${GREEN}[OK]${NC} $1"
+    echo -e# Crear archivo de servicio systemd
+create_systemd_service() {
+    # Detectar la ruta de Node.js para el servicio
+    local node_exec_path="/usr/bin/node"NC} $1"
 }
 
 log_warning() {
@@ -90,15 +92,13 @@ install_system_dependencies() {
         "gnupg"
         "software-properties-common"
         "build-essential"
-        "python3"
-        "python3-pip"
-        "python3-venv"
         "git"
         "ufw"
         "htop"
-        "nginx"
-        "certbot"
-        "rsync"
+        "netstat-nat"
+        "lsof"
+        "net-tools"
+    )
     )
     
     exec_command "apt install -y ${packages[*]}" "Instalando dependencias del sistema"
@@ -517,14 +517,43 @@ copy_project_files() {
     fi
 }
 
-# Crear entorno virtual Python
-create_virtual_environment() {
-    log_info "Creando entorno virtual Python..."
+# Instalar dependencias Node.js
+install_node_dependencies() {
+    log_info "Instalando dependencias Node.js..."
     
-    exec_command "sudo -u $USER python3 -m venv $VENV_PATH" "Creando entorno virtual"
+    cd "$PROJECT_DIR"
     
-    # Instalar algunas utilidades Python útiles
-    exec_command "sudo -u $USER $VENV_PATH/bin/pip install requests psutil" "Instalando utilidades Python"
+    # Verificar que package.json existe
+    if [[ ! -f "package.json" ]]; then
+        log_error "package.json no encontrado en $PROJECT_DIR"
+        return 1
+    fi
+    
+    # Limpiar caché npm y node_modules previos
+    log_info "Limpiando instalación previa..."
+    sudo -u $USER rm -rf node_modules package-lock.json 2>/dev/null || true
+    sudo -u $USER npm cache clean --force 2>/dev/null || true
+    
+    # Configurar npm para el usuario proxy
+    sudo -u $USER npm config set registry https://registry.npmjs.org/
+    sudo -u $USER npm config set prefix "$PROJECT_DIR/.npm-global"
+    
+    # Instalar dependencias con configuración explícita
+    if sudo -u $USER npm install --production --no-optional --no-audit --no-fund; then
+        log_success "Dependencias Node.js instaladas correctamente"
+    else
+        log_error "Error instalando dependencias npm"
+        log_info "Intentando instalación alternativa..."
+        
+        # Método alternativo: instalar una por una
+        sudo -u $USER npm install express cors helmet compression --production --no-optional
+        if [[ $? -eq 0 ]]; then
+            log_success "Dependencias instaladas con método alternativo"
+        else
+            log_error "Falló instalación de dependencias npm"
+            return 1
+        fi
+    fi
 }
 
 # Verificar y auto-reparar instalación completa
@@ -566,17 +595,7 @@ verify_and_fix_installation() {
     return 0
 }
 
-# Instalar dependencias Node.js
-install_node_dependencies() {
-    log_info "Instalando dependencias Node.js..."
-    
-    cd "$PROJECT_DIR"
-    
-    exec_command "sudo -u $USER npm install --production" "Instalando dependencias npm"
-    
-    # Instalar herramientas globales
-    exec_command "npm install -g nodemon pm2" "Instalando herramientas globales"
-}
+
 
 # Crear archivo de servicio systemd
 create_systemd_service() {
@@ -851,7 +870,6 @@ ${NC}"
     create_system_user
     create_project_directory
     copy_project_files
-    create_virtual_environment
     install_node_dependencies
     create_systemd_service
     configure_firewall
