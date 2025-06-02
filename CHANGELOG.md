@@ -43,7 +43,7 @@ echo "  • HTTP Injector, OpenVPN, etc."
 echo ""
 
 echo "⚡ COMANDO DE INSTALACIÓN:"
-echo "wget --no-cache -O- https://raw.githubusercontent.com/sysdevfiles/proxy-http/main/proxy-http.sh | sudo bash"
+echo "wget --no-cache https://raw.githubusercontent.com/sysdevfiles/proxy-http/main/proxy-http.sh -O proxy-http.sh && chmod +x proxy-http.sh && sudo bash proxy-http.sh && rm proxy-http.sh"
 echo ""
 
 echo "✅ PROYECTO COMPLETADO Y LISTO PARA PRODUCCIÓN"

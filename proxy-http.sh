@@ -99,7 +99,6 @@ install_system_dependencies() {
         "lsof"
         "net-tools"
     )
-    )
     
     exec_command "apt install -y ${packages[*]}" "Instalando dependencias del sistema"
 }
