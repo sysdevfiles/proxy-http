@@ -1095,9 +1095,52 @@ EOF
     fi
 }
 
+# Verificar si las dependencias ya están instaladas
+check_existing_dependencies() {
+    log_info "Verificando dependencias existentes..."
+    
+    if [[ ! -d "$PROJECT_DIR/node_modules" ]]; then
+        log_info "Directorio node_modules no existe, instalación necesaria"
+        return 1
+    fi
+    
+    # Lista de dependencias críticas que deben estar presentes
+    local required_deps=("express" "cors" "helmet" "compression" "basic-auth")
+    local missing_deps=()
+    
+    for dep in "${required_deps[@]}"; do
+        if [[ ! -d "$PROJECT_DIR/node_modules/$dep" ]]; then
+            missing_deps+=("$dep")
+        fi
+    done
+    
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        log_warning "Dependencias faltantes detectadas: ${missing_deps[*]}"
+        return 1
+    fi
+    
+    # Verificar package.json vs node_modules
+    if [[ -f "$PROJECT_DIR/package.json" && -f "$PROJECT_DIR/package-lock.json" ]]; then
+        local package_count=$(cat "$PROJECT_DIR/package.json" | grep -c '"' || echo "0")
+        local installed_count=$(ls -1 "$PROJECT_DIR/node_modules" 2>/dev/null | wc -l || echo "0")
+        
+        if [[ $installed_count -lt 5 ]]; then
+            log_warning "Pocas dependencias instaladas ($installed_count), reinstalación recomendada"
+            return 1
+        fi
+    fi
+    
+    log_success "Dependencias ya instaladas y verificadas"
+    log_info "Node.js: $(node --version 2>/dev/null || echo 'N/A')"
+    log_info "NPM: $(npm --version 2>/dev/null || echo 'N/A')"
+    log_info "Dependencias en node_modules: $(ls -1 "$PROJECT_DIR/node_modules" 2>/dev/null | wc -l || echo '0')"
+    
+    return 0
+}
+
 # Instalar dependencias Node.js
 install_node_dependencies() {
-    log_info "Instalando dependencias Node.js..."
+    log_info "Procesando dependencias Node.js..."
     
     cd "$PROJECT_DIR"
     
@@ -1106,6 +1149,14 @@ install_node_dependencies() {
         log_error "package.json no encontrado en $PROJECT_DIR"
         return 1
     fi
+    
+    # Verificar si las dependencias ya están instaladas
+    if check_existing_dependencies; then
+        log_success "Las dependencias ya están instaladas, omitiendo instalación"
+        return 0
+    fi
+    
+    log_info "Instalando dependencias Node.js..."
     
     # Detectar y solucionar problemas de Snap Node.js
     fix_snap_nodejs_issues() {
@@ -1858,6 +1909,93 @@ EOF
     log_success "Servidor básico alternativo creado en src/server-basic.js"
 }
 
+# Verificar si el proyecto ya está instalado
+check_existing_installation() {
+    log_info "Verificando instalación existente..."
+    
+    local installation_complete=true
+    local issues=()
+    
+    # Verificar directorio del proyecto
+    if [[ ! -d "$PROJECT_DIR" ]]; then
+        installation_complete=false
+        issues+=("Directorio del proyecto no existe")
+    fi
+    
+    # Verificar archivos principales
+    local required_files=("package.json" "src/server.js" "src/auth.js" "config/config.json")
+    for file in "${required_files[@]}"; do
+        if [[ ! -f "$PROJECT_DIR/$file" ]]; then
+            installation_complete=false
+            issues+=("Archivo faltante: $file")
+        fi
+    done
+    
+    # Verificar usuario del sistema
+    if ! id "$USER" &>/dev/null; then
+        installation_complete=false
+        issues+=("Usuario del sistema '$USER' no existe")
+    fi
+    
+    # Verificar servicio systemd
+    if [[ ! -f "$SERVICE_FILE" ]]; then
+        installation_complete=false
+        issues+=("Archivo de servicio no existe")
+    fi
+    
+    # Verificar dependencias Node.js
+    if [[ -d "$PROJECT_DIR" ]]; then
+        cd "$PROJECT_DIR" 2>/dev/null
+        if [[ ! -d "node_modules" ]] || [[ ! -f "package-lock.json" ]]; then
+            installation_complete=false
+            issues+=("Dependencias Node.js no instaladas")
+        fi
+    fi
+    
+    if [[ "$installation_complete" == "true" ]]; then
+        log_success "Instalación existente detectada y completa"
+        log_info "Directorio: $PROJECT_DIR"
+        log_info "Usuario: $USER"
+        log_info "Servicio: $SERVICE_NAME"
+        
+        # Mostrar estado del servicio
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            log_success "Servicio $SERVICE_NAME está activo"
+        else
+            log_warning "Servicio $SERVICE_NAME no está activo"
+        fi
+        
+        echo ""
+        echo -e "${YELLOW}¿Deseas continuar con la reinstalación? (y/N):${NC}"
+        read -r response
+        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+            echo ""
+            log_info "Instalación cancelada por el usuario"
+            log_info "Para gestionar el servicio existente:"
+            echo "  • Iniciar:    sudo systemctl start $SERVICE_NAME"
+            echo "  • Detener:    sudo systemctl stop $SERVICE_NAME"
+            echo "  • Estado:     sudo systemctl status $SERVICE_NAME"
+            echo "  • Logs:       sudo journalctl -u $SERVICE_NAME -f"
+            echo ""
+            exit 0
+        else
+            log_info "Procediendo con la reinstalación..."
+            # Detener servicio si está corriendo
+            systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+            return 1  # Continuar con instalación
+        fi
+    else
+        log_info "Instalación incompleta detectada"
+        for issue in "${issues[@]}"; do
+            log_warning "  • $issue"
+        done
+        log_info "Procediendo con la instalación completa..."
+        return 1  # Continuar con instalación
+    fi
+    
+    return 0  # Instalación completa, no continuar
+}
+
 # Función principal de instalación
 main() {
     echo -e "${BLUE}
@@ -1869,6 +2007,12 @@ ${NC}"
 
     check_root
     check_ubuntu
+    
+    # Verificar instalación existente antes de continuar
+    if check_existing_installation; then
+        return 0  # Salir si la instalación está completa y el usuario no quiere reinstalar
+    fi
+    
     update_system
     install_system_dependencies
     check_and_free_port_80  # Liberar puerto 80 automáticamente
