@@ -1097,11 +1097,11 @@ EOF
 
 # Verificar si las dependencias ya están instaladas
 check_existing_dependencies() {
-    log_info "Verificando dependencias existentes..."
+    # Verificación silenciosa - no mostrar mensajes innecesarios
     
+    # Si no existe node_modules, es normal en instalación nueva - no reportar
     if [[ ! -d "$PROJECT_DIR/node_modules" ]]; then
-        log_info "Directorio node_modules no existe, instalación necesaria"
-        return 1
+        return 1  # Necesita instalación, sin mensaje
     fi
     
     # Lista de dependencias críticas que deben estar presentes
@@ -1130,6 +1130,7 @@ check_existing_dependencies() {
         fi
     fi
     
+    # Solo mostrar mensajes cuando las dependencias SÍ están instaladas
     log_success "Dependencias ya instaladas y verificadas"
     log_info "Node.js: $(node --version 2>/dev/null || echo 'N/A')"
     log_info "NPM: $(npm --version 2>/dev/null || echo 'N/A')"
@@ -1156,6 +1157,7 @@ install_node_dependencies() {
         return 0
     fi
     
+    # Si llegamos aquí, necesitamos instalar dependencias
     log_info "Instalando dependencias Node.js..."
     
     # Detectar y solucionar problemas de Snap Node.js
