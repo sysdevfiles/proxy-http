@@ -47,7 +47,39 @@ systemctl restart http-proxy-101
 
 # Script de reinicio con auto-reparación
 /opt/http-proxy-101/scripts/restart.sh
+
+# Debugging de instalación (si hay problemas)
+cd /opt/http-proxy-101
+npm --version
+node --version
+ls -la package.json
+ls -la node_modules/
 ```
+
+## 🚨 Solución de Problemas
+
+Si el instalador se cuelga en "Instalando dependencias Node.js":
+
+1. **Verificar Node.js y npm**:
+   ```bash
+   which node
+   which npm  
+   node --version
+   npm --version
+   ```
+
+2. **Instalar manualmente si es necesario**:
+   ```bash
+   cd /opt/http-proxy-101
+   sudo npm install --production --no-optional --no-audit --no-fund
+   ```
+
+3. **Usar servidor básico sin dependencias**:
+   ```bash
+   systemctl stop http-proxy-101
+   cp /opt/http-proxy-101/src/server-basic.js /opt/http-proxy-101/src/server.js
+   systemctl start http-proxy-101
+   ```
 
 ## 🛠️ Solución de Problemas
 

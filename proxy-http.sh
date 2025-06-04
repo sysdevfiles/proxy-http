@@ -628,27 +628,6 @@ install_node_dependencies() {
         return 1
     fi
     
-    # Función para ejecutar npm con timeout
-    run_npm_with_timeout() {
-        local cmd="$1"
-        local timeout_seconds=300  # 5 minutos máximo
-        
-        log_info "Ejecutando: $cmd (timeout: ${timeout_seconds}s)"
-        
-        # Ejecutar con timeout
-        if timeout "$timeout_seconds" bash -c "$cmd"; then
-            return 0
-        else
-            local exit_code=$?
-            if [[ $exit_code -eq 124 ]]; then
-                log_error "Comando npm excedió timeout de ${timeout_seconds} segundos"
-            else
-                log_error "Comando npm falló con código: $exit_code"
-            fi
-            return 1
-        fi
-    }
-    
     # Detectar y solucionar problemas de Snap Node.js
     fix_snap_nodejs_issues() {
         local nodejs_path=$(which node 2>/dev/null || which nodejs 2>/dev/null)
@@ -679,44 +658,119 @@ install_node_dependencies() {
         return 1
     }
     
+    # Función simple para ejecutar npm con debug
+    run_npm_install() {
+        local cmd="$1"
+        local desc="$2"
+        
+        log_info "$desc"
+        log_info "Ejecutando: $cmd"
+        log_info "Directorio actual: $(pwd)"
+        log_info "Usuario actual: $(whoami)"
+        log_info "Node.js version: $(node --version 2>/dev/null || echo 'N/A')"
+        log_info "NPM version: $(npm --version 2>/dev/null || echo 'N/A')"
+        
+        # Verificar package.json antes de instalar
+        if [[ -f package.json ]]; then
+            log_info "package.json encontrado, contenido:"
+            cat package.json | head -10
+        else
+            log_error "package.json NO encontrado"
+            return 1
+        fi
+        
+        # Ejecutar con output en tiempo real para diagnóstico
+        log_info "Iniciando instalación de dependencias..."
+        if eval "$cmd"; then
+            log_success "$desc - COMPLETADO"
+            
+            # Verificar que node_modules se creó
+            if [[ -d "node_modules" ]]; then
+                log_success "Directorio node_modules creado correctamente"
+                log_info "Contenido de node_modules: $(ls -la node_modules/ 2>/dev/null | wc -l) elementos"
+            else
+                log_warning "node_modules no se creó"
+            fi
+            return 0
+        else
+            local exit_code=$?
+            log_error "$desc - FALLÓ (código: $exit_code)"
+            
+            # Diagnóstico adicional en caso de error
+            log_info "=== DIAGNÓSTICO POST-ERROR ==="
+            log_info "Contenido del directorio:"
+            ls -la . 2>/dev/null || true
+            log_info "Logs de npm (últimas 10 líneas):"
+            tail -10 ~/.npm/_logs/*.log 2>/dev/null || log_info "No hay logs de npm disponibles"
+            
+            return 1
+        fi
+    }
+    
     # Aplicar correcciones si es necesario
     fix_snap_nodejs_issues
     
+    # Verificar que npm está disponible
+    if ! command -v npm >/dev/null 2>&1; then
+        log_error "npm no está disponible en el sistema"
+        log_info "Intentando detectar y reparar Node.js..."
+        if ! detect_and_fix_nodejs; then
+            log_error "No se pudo configurar npm automáticamente"
+            return 1
+        fi
+        
+        # Verificar de nuevo
+        if ! command -v npm >/dev/null 2>&1; then
+            log_error "npm sigue sin estar disponible después de la reparación"
+            return 1
+        fi
+    fi
+    
+    log_info "npm disponible en: $(which npm)"
+    
     # Limpiar caché npm y node_modules previos
     log_info "Limpiando instalación previa..."
-    sudo -u $USER rm -rf node_modules package-lock.json 2>/dev/null || true
+    rm -rf node_modules package-lock.json 2>/dev/null || true
     
     # Limpiar cache npm de forma segura
     log_info "Limpiando cache npm..."
-    if ! sudo -u $USER npm cache clean --force 2>/dev/null; then
+    if ! npm cache clean --force 2>/dev/null; then
         log_warning "No se pudo limpiar cache npm, continuando..."
     fi
     
-    # Configurar npm
-    sudo -u $USER npm config set registry https://registry.npmjs.org/
+    # Configurar npm registry
+    npm config set registry https://registry.npmjs.org/
     
-    # Método 1: Instalación estándar con timeout
-    log_info "Método 1: Instalación estándar de dependencias..."
-    if run_npm_with_timeout "sudo -u $USER npm install --production --no-optional --no-audit --no-fund"; then
-        log_success "Dependencias Node.js instaladas correctamente"
-        return 0
+    # Cambiar propietario del directorio antes de instalar
+    chown -R $USER:$USER "$PROJECT_DIR"
+    
+    # Método 1: Instalación directa sin sudo
+    log_info "Método 1: Instalación directa de dependencias..."
+    if run_npm_install "npm install --production --no-optional --no-audit --no-fund" "Instalación estándar"; then
+        # Verificar que se instalaron correctamente
+        if [[ -d "node_modules" ]]; then
+            log_success "Dependencias Node.js instaladas correctamente"
+            return 0
+        fi
     fi
     
-    # Método 2: Sin cache para evitar problemas de Snap
-    log_warning "Método 1 falló, intentando sin cache..."
-    if run_npm_with_timeout "sudo -u $USER npm install --production --no-optional --no-audit --no-fund --cache-min 0"; then
-        log_success "Dependencias instaladas sin cache"
-        return 0
+    # Método 2: Instalación con usuario específico
+    log_warning "Método 1 falló, intentando como usuario $USER..."
+    if run_npm_install "sudo -u $USER npm install --production --no-optional --no-audit --no-fund" "Instalación como usuario"; then
+        if [[ -d "node_modules" ]]; then
+            log_success "Dependencias instaladas como usuario"
+            return 0
+        fi
     fi
     
-    # Método 3: Instalación manual una por una con timeout
+    # Método 3: Instalación manual una por una
     log_warning "Método 2 falló, instalando dependencias una por una..."
     local packages=("express" "cors" "helmet" "compression")
     local all_success=true
     
     for package in "${packages[@]}"; do
         log_info "Instalando $package individualmente..."
-        if run_npm_with_timeout "sudo -u $USER npm install $package --production --no-optional --no-audit --no-fund"; then
+        if run_npm_install "npm install $package --production --no-optional --no-audit --no-fund" "Instalando $package"; then
             log_success "$package instalado correctamente"
         else
             log_error "Error instalando $package"
@@ -724,48 +778,33 @@ install_node_dependencies() {
         fi
     done
     
-    if $all_success; then
+    if $all_success && [[ -d "node_modules" ]]; then
         log_success "Todas las dependencias instaladas individualmente"
         return 0
     fi
     
-    # Método 4: Último recurso - usar Node.js de sistema sin Snap
-    log_error "Todos los métodos npm fallaron"
-    log_info "Método 4: Intentando reinstalar Node.js sin Snap..."
-    
-    # Remover Snap Node.js problemático
-    if command -v snap >/dev/null 2>&1 && snap list 2>/dev/null | grep -q "node"; then
-        log_info "Removiendo Node.js de Snap..."
-        snap remove node >/dev/null 2>&1 || true
-        sleep 2
-    fi
-    
-    # Limpiar instalaciones previas
-    apt remove -y nodejs npm >/dev/null 2>&1 || true
-    apt autoremove -y >/dev/null 2>&1 || true
-    
-    # Instalar Node.js desde NodeSource
-    log_info "Instalando Node.js desde NodeSource..."
-    if curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1; then
-        if apt install -y nodejs >/dev/null 2>&1; then
-            # Verificar nueva instalación
-            if detect_and_fix_nodejs; then
-                log_success "Node.js reinstalado exitosamente"
-                # Reintentar instalación de dependencias
-                cd "$PROJECT_DIR"
-                if run_npm_with_timeout "sudo -u $USER npm install --production --no-optional --no-audit --no-fund"; then
-                    log_success "Dependencias instaladas después de reinstalar Node.js"
-                    return 0
-                fi
+    # Método 4: Instalación con npm global
+    log_warning "Método 3 falló, intentando instalación global..."
+    if run_npm_install "npm install -g express cors helmet compression" "Instalación global"; then
+        # Crear enlaces simbólicos
+        mkdir -p node_modules
+        for package in express cors helmet compression; do
+            if [[ -d "/usr/lib/node_modules/$package" ]]; then
+                ln -sf "/usr/lib/node_modules/$package" "node_modules/$package" 2>/dev/null || true
             fi
+        done
+        
+        if [[ -d "node_modules/express" ]]; then
+            log_success "Dependencias instaladas globalmente y enlazadas"
+            return 0
         fi
     fi
     
     # Método 5: Fallback con servidor básico sin dependencias
-    log_warning "Método 4 falló, creando servidor básico..."
+    log_warning "Todos los métodos npm fallaron, creando servidor básico sin dependencias..."
     
     # Crear node_modules básico manualmente
-    sudo -u $USER mkdir -p node_modules
+    mkdir -p node_modules
     
     # Verificar si al menos Node.js está disponible para servidor básico
     if command -v node >/dev/null 2>&1; then
@@ -778,7 +817,7 @@ install_node_dependencies() {
         fi
         
         log_warning "Servidor configurado en modo básico (sin dependencias externas)"
-        log_warning "Funcionalidad limitada pero operacional"
+        log_warning "El proxy funcionará con funcionalidad limitada pero operacional"
         return 0
     fi
     
