@@ -31,6 +31,93 @@ Después de la instalación, usa estos datos:
 Host: TU_IP_VPS
 Port: 80
 Type: HTTP
+Username: tu_usuario_vps
+Password: tu_contraseña_vps
+```
+
+> 📋 **Nota**: El proxy utiliza autenticación PAM contra los usuarios del sistema VPS. Usa las mismas credenciales que usas para SSH.
+
+## 🔐 Configuración de Autenticación
+
+El proxy incluye autenticación VPS integrada que valida contra los usuarios del sistema Linux:
+
+### Configurar Usuarios Permitidos
+
+Edita el archivo de configuración:
+```bash
+nano /opt/http-proxy-101/config/config.json
+```
+
+Para permitir solo usuarios específicos:
+```json
+{
+  "server": {
+    "auth": {
+      "enabled": true,
+      "allowedUsers": ["usuario1", "usuario2", "admin"]
+    }
+  }
+}
+```
+
+Para permitir todos los usuarios del sistema (por defecto):
+```json
+{
+  "server": {
+    "auth": {
+      "enabled": true,
+      "allowedUsers": []
+    }
+  }
+}
+```
+
+### Crear Usuario Específico para el Proxy
+
+Si quieres crear un usuario dedicado:
+```bash
+# Crear usuario para el proxy
+sudo useradd -m -s /bin/bash proxyuser
+
+# Establecer contraseña
+sudo passwd proxyuser
+
+# Agregar a la configuración
+nano /opt/http-proxy-101/config/config.json
+```
+
+### Habilitar PAM (Si No Está Disponible)
+
+Si durante la instalación se mostró que PAM no está disponible:
+
+```bash
+# Instalar herramientas de compilación y headers PAM
+sudo apt-get update
+sudo apt-get install build-essential libpam0g-dev python3
+
+# Reinstalar authenticate-pam
+cd /opt/http-proxy-101
+sudo npm install authenticate-pam --production
+
+# Reiniciar el servicio
+systemctl restart http-proxy-101
+```
+
+### Desactivar Autenticación (No Recomendado)
+
+```json
+{
+  "server": {
+    "auth": {
+      "enabled": false
+    }
+  }
+}
+```
+
+Después de cualquier cambio, reinicia el servicio:
+```bash
+systemctl restart http-proxy-101
 ```
 
 ## 🔧 Comandos Útiles

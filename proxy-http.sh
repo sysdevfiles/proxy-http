@@ -164,11 +164,20 @@ install_nodejs() {
     # Limpiar instalaciones problemáticas
     apt remove -y nodejs npm >/dev/null 2>&1 || true
     apt autoremove -y >/dev/null 2>&1 || true
+    apt clean >/dev/null 2>&1 || true
+    
+    # Limpiar paquetes residuales específicos
+    dpkg --purge node-esprima node-mime node-source-map node-sprintf-js >/dev/null 2>&1 || true
     
     # Método 1: NodeSource (mejor opción)
     log_info "Método 1: NodeSource..."
-    if curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - >/dev/null 2>&1; then
-        if apt install -y nodejs >/dev/null 2>&1; then
+    if curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - >/dev/null 2>&1; then
+        if sudo apt install -y nodejs >/dev/null 2>&1; then
+            # Limpieza post-instalación
+            sudo apt autoremove -y >/dev/null 2>&1 || true
+            sudo apt clean >/dev/null 2>&1 || true
+            sudo dpkg --purge node-esprima node-mime node-source-map node-sprintf-js >/dev/null 2>&1 || true
+            
             if detect_and_fix_nodejs; then
                 log_success "Node.js instalado vía NodeSource"
                 return 0
@@ -524,7 +533,9 @@ copy_project_files() {
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "helmet": "^7.1.0",
-    "compression": "^1.7.4"
+    "compression": "^1.7.4",
+    "authenticate-pam": "^1.0.2",
+    "basic-auth": "^2.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
@@ -535,70 +546,538 @@ copy_project_files() {
 }
 EOF
 
+    log_info "Creando auth.js..."
+    cat > "$PROJECT_DIR/src/auth.js" << 'EOF'
+const basicAuth = require('basic-auth');
+
+// Intentar cargar authenticate-pam
+let authenticatePam;
+try {
+  authenticatePam = require('authenticate-pam');
+  console.log('✅ PAM disponible para autenticación del sistema');
+} catch (err) {
+  console.log('⚠️  PAM no disponible, autenticación limitada al modo básico');
+  authenticatePam = null;
+}
+
+// Sistemas de autenticación disponibles
+const AuthSystems = {
+  PAM: 'pam',
+  BASIC: 'basic'
+};
+
+class ProxyAuth {
+  constructor(config = {}) {
+    this.config = {
+      enabled: config.enabled || false,
+      method: config.method || AuthSystems.PAM,
+      realm: config.realm || 'HTTP Proxy 101',
+      allowedUsers: config.allowedUsers || [],
+      failedAttempts: config.failedAttempts || {
+        maxAttempts: 3,
+        blockDuration: 300000 // 5 minutos
+      }
+    };
+    
+    // Registro de intentos fallidos por IP
+    this.failedAttempts = new Map();
+    
+    // Limpiar intentos fallidos cada hora
+    setInterval(() => {
+      this.cleanupFailedAttempts();
+    }, 3600000);
+  }
+
+  // Middleware de autenticación para Express
+  middleware() {
+    return (req, res, next) => {
+      if (!this.config.enabled) {
+        return next();
+      }
+
+      const clientIP = req.socket.remoteAddress || req.ip;
+      
+      // Verificar si la IP está bloqueada
+      if (this.isIPBlocked(clientIP)) {
+        this.sendAuthRequired(res, 'IP temporalmente bloqueada por múltiples intentos fallidos');
+        return;
+      }
+
+      const credentials = basicAuth(req);
+      
+      if (!credentials) {
+        this.sendAuthRequired(res);
+        return;
+      }
+
+      // Validar credenciales
+      this.validateCredentials(credentials.name, credentials.pass, clientIP)
+        .then(isValid => {
+          if (isValid) {
+            console.log(`✅ Autenticación exitosa para usuario: ${credentials.name} desde ${clientIP}`);
+            this.clearFailedAttempts(clientIP);
+            next();
+          } else {
+            console.log(`❌ Autenticación fallida para usuario: ${credentials.name} desde ${clientIP}`);
+            this.recordFailedAttempt(clientIP);
+            this.sendAuthRequired(res, 'Credenciales inválidas');
+          }
+        })
+        .catch(error => {
+          console.error('Error en autenticación:', error.message);
+          this.sendAuthRequired(res, 'Error interno de autenticación');
+        });
+    };
+  }
+
+  // Validar credenciales contra el sistema
+  async validateCredentials(username, password, clientIP) {
+    try {
+      // Verificar lista de usuarios permitidos si está configurada
+      if (this.config.allowedUsers.length > 0 && 
+          !this.config.allowedUsers.includes(username)) {
+        console.log(`🚫 Usuario ${username} no está en la lista de permitidos`);
+        return false;
+      }
+
+      // Validación PAM (sistema Linux)
+      if (this.config.method === AuthSystems.PAM && authenticatePam) {
+        return new Promise((resolve) => {
+          authenticatePam.authenticate(username, password, (err) => {
+            if (err) {
+              console.log(`🔐 PAM: Falló autenticación para ${username}: ${err.message}`);
+              resolve(false);
+            } else {
+              console.log(`🔐 PAM: Autenticación exitosa para ${username}`);
+              resolve(true);
+            }
+          });
+        });
+      }
+
+      // Fallback: validación básica deshabilitada por seguridad
+      if (this.config.method === AuthSystems.PAM && !authenticatePam) {
+        console.log('❌ PAM no está disponible - autenticación deshabilitada por seguridad');
+        return false;
+      }
+      
+      console.log('⚠️  Método de autenticación no válido');
+      return false;
+
+    } catch (error) {
+      console.error('Error validando credenciales:', error.message);
+      return false;
+    }
+  }
+
+  // Función para autenticación directa en proxies HTTP
+  async authenticateProxy(req, res) {
+    if (!this.config.enabled) {
+      return true;
+    }
+
+    const clientIP = req.socket.remoteAddress;
+    
+    // Verificar si la IP está bloqueada
+    if (this.isIPBlocked(clientIP)) {
+      this.sendProxyAuthRequired(res, 'IP temporalmente bloqueada');
+      return false;
+    }
+
+    const authHeader = req.headers['proxy-authorization'];
+    
+    if (!authHeader || !authHeader.startsWith('Basic ')) {
+      this.sendProxyAuthRequired(res);
+      return false;
+    }
+
+    try {
+      const credentials = Buffer.from(authHeader.slice(6), 'base64').toString();
+      const [username, password] = credentials.split(':');
+
+      if (!username || !password) {
+        this.sendProxyAuthRequired(res, 'Formato de credenciales inválido');
+        return false;
+      }
+
+      const isValid = await this.validateCredentials(username, password, clientIP);
+      
+      if (isValid) {
+        console.log(`✅ Autenticación proxy exitosa para usuario: ${username} desde ${clientIP}`);
+        this.clearFailedAttempts(clientIP);
+        return true;
+      } else {
+        console.log(`❌ Autenticación proxy fallida para usuario: ${username} desde ${clientIP}`);
+        this.recordFailedAttempt(clientIP);
+        this.sendProxyAuthRequired(res, 'Credenciales inválidas');
+        return false;
+      }
+
+    } catch (error) {
+      console.error('Error en autenticación proxy:', error.message);
+      this.sendProxyAuthRequired(res, 'Error interno de autenticación');
+      return false;
+    }
+  }
+
+  // Enviar respuesta de autenticación requerida (HTTP)
+  sendAuthRequired(res, message = 'Autenticación requerida') {
+    res.writeHead(401, {
+      'WWW-Authenticate': `Basic realm="${this.config.realm}"`,
+      'Content-Type': 'text/plain',
+      'Connection': 'close'
+    });
+    res.end(message);
+  }
+
+  // Enviar respuesta de autenticación requerida (Proxy)
+  sendProxyAuthRequired(res, message = 'Autenticación proxy requerida') {
+    res.writeHead(407, {
+      'Proxy-Authenticate': `Basic realm="${this.config.realm}"`,
+      'Content-Type': 'text/plain',
+      'Connection': 'close'
+    });
+    res.end(message);
+  }
+
+  // Gestión de intentos fallidos
+  isIPBlocked(ip) {
+    const attempts = this.failedAttempts.get(ip);
+    if (!attempts) return false;
+    
+    const now = Date.now();
+    if (now - attempts.lastAttempt > this.config.failedAttempts.blockDuration) {
+      this.failedAttempts.delete(ip);
+      return false;
+    }
+    
+    return attempts.count >= this.config.failedAttempts.maxAttempts;
+  }
+
+  recordFailedAttempt(ip) {
+    const now = Date.now();
+    const attempts = this.failedAttempts.get(ip) || { count: 0, lastAttempt: now };
+    
+    attempts.count++;
+    attempts.lastAttempt = now;
+    
+    this.failedAttempts.set(ip, attempts);
+    
+    if (attempts.count >= this.config.failedAttempts.maxAttempts) {
+      console.log(`🚫 IP ${ip} bloqueada por ${this.config.failedAttempts.maxAttempts} intentos fallidos`);
+    }
+  }
+
+  clearFailedAttempts(ip) {
+    this.failedAttempts.delete(ip);
+  }
+
+  cleanupFailedAttempts() {
+    const now = Date.now();
+    const expiredIPs = [];
+    
+    for (const [ip, attempts] of this.failedAttempts.entries()) {
+      if (now - attempts.lastAttempt > this.config.failedAttempts.blockDuration) {
+        expiredIPs.push(ip);
+      }
+    }
+    
+    expiredIPs.forEach(ip => this.failedAttempts.delete(ip));
+    
+    if (expiredIPs.length > 0) {
+      console.log(`🧹 Limpiados ${expiredIPs.length} registros de intentos fallidos expirados`);
+    }
+  }
+
+  // Obtener estadísticas de autenticación
+  getStats() {
+    return {
+      enabled: this.config.enabled,
+      method: this.config.method,
+      blockedIPs: this.failedAttempts.size,
+      allowedUsers: this.config.allowedUsers.length
+    };
+  }
+}
+
+module.exports = { ProxyAuth, AuthSystems };
+EOF
+
     log_info "Creando server.js..."
     cat > "$PROJECT_DIR/src/server.js" << 'EOF'
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const compression = require('compression');
+const http = require('http');
+const net = require('net');
+const url = require('url');
+const fs = require('fs');
+const path = require('path');
 
-const app = express();
-const PORT = process.env.PORT || 80;
-const HOST = process.env.HOST || '0.0.0.0';
+// Cargar sistema de autenticación
+const { ProxyAuth } = require('./auth');
 
-// Middleware de seguridad y optimización
-app.use(helmet({
-    contentSecurityPolicy: false,
-    crossOriginEmbedderPolicy: false
-}));
-app.use(cors());
-app.use(compression());
-app.use(express.json({ limit: '10mb' }));
+// Cargar dependencias adicionales si están disponibles
+let express, cors, helmet, compression;
+try {
+  express = require('express');
+  cors = require('cors');
+  helmet = require('helmet');
+  compression = require('compression');
+} catch (err) {
+  console.log('ℹ️  Ejecutando en modo básico sin dependencias adicionales');
+}
 
-// Ruta principal - Responder con HTTP 101
-app.all('*', (req, res) => {
-    // Headers para HTTP 101 Switching Protocols
-    res.status(101);
-    res.set({
-        'Connection': 'Upgrade',
-        'Upgrade': 'websocket',
-        'Sec-WebSocket-Accept': 'dummy',
-        'Sec-WebSocket-Protocol': 'chat',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
+// Cargar configuración
+let config;
+try {
+  const configPath = path.join(__dirname, '..', 'config', 'config.json');
+  config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+} catch (err) {
+  console.log('⚠️  Usando configuración por defecto');
+  config = {
+    server: {
+      host: "0.0.0.0",
+      port: 8080,
+      timeout: 30000,
+      mode: "proxy",
+      security: {
+        helmet: false,
+        cors: false,
+        compression: false
+      }
+    },
+    proxy: {
+      httpsRedirectPort: 443,
+      responseCode: 101,
+      responseMessage: "Switching Protocols"
+    }
+  };
+}
+
+class HttpProxy101 {
+  constructor(options = {}) {
+    // Usar puerto de configuración o del entorno en producción
+    this.port = process.env.NODE_ENV === 'production' 
+      ? (config.production?.port || 80) 
+      : (options.port || config.server.port || 8080);
+    this.host = options.host || config.server.host || '0.0.0.0';
+    this.server = null;
+    
+    // Inicializar sistema de autenticación
+    this.auth = new ProxyAuth(config.server?.auth || {});
+    
+    console.log(`🔐 Autenticación: ${this.auth.config.enabled ? 'HABILITADA' : 'DESHABILITADA'}`);
+    if (this.auth.config.enabled) {
+      console.log(`🔑 Método: ${this.auth.config.method.toUpperCase()}`);
+      console.log(`👥 Usuarios permitidos: ${this.auth.config.allowedUsers.length > 0 ? this.auth.config.allowedUsers.join(', ') : 'TODOS'}`);
+    }
+  }
+
+  start() {
+    this.server = http.createServer();
+      // Manejar solicitudes HTTP
+    this.server.on('request', async (req, res) => {
+      await this.handleRequest(req, res);
     });
     
-    // Log de la petición
-    const timestamp = new Date().toISOString();
-    console.log(`${timestamp} - ${req.method} ${req.url} - ${req.ip}`);
+    // Manejar método CONNECT para túneles HTTPS
+    this.server.on('connect', async (req, clientSocket, head) => {
+      await this.handleConnect(req, clientSocket, head);
+    });
     
-    // Respuesta con código 101
+    this.server.listen(this.port, this.host, () => {
+      console.log(`🚀 HTTP Proxy 101 iniciado en ${this.host}:${this.port}`);
+      console.log(`📡 Listo para recibir conexiones...`);
+      console.log(`🔧 Modo: ${process.env.NODE_ENV || 'development'}`);
+    });
+  }
+  async handleRequest(req, res) {
+    console.log(`📝 ${req.method} ${req.url} - ${req.socket.remoteAddress}`);
+    
+    // Verificar autenticación si está habilitada
+    if (this.auth.config.enabled) {
+      const isAuthenticated = await this.auth.authenticateProxy(req, res);
+      if (!isAuthenticated) {
+        return; // La respuesta ya fue enviada por el sistema de auth
+      }
+    }
+    
+    // Headers personalizados desde configuración
+    const customHeaders = config.proxy?.headers || {};
+    
+    // Responder con código 101 y headers personalizados
+    res.writeHead(config.proxy?.responseCode || 101, config.proxy?.responseMessage || 'Switching Protocols', {
+      'Connection': 'Upgrade',
+      'Upgrade': 'HTTP/1.1',
+      'Server': 'HTTP-Proxy-101',
+      'X-Proxy-Status': 'Active',
+      'X-Bypass-Mode': 'Enabled',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, CONNECT, OPTIONS',
+      'Access-Control-Allow-Headers': '*',
+      ...customHeaders
+    });
+    
     res.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
-});
+  }
 
-// Iniciar servidor
-const server = app.listen(PORT, HOST, () => {
-    console.log(`🚀 HTTP Proxy 101 iniciado en ${HOST}:${PORT}`);
-    console.log(`💾 PID: ${process.pid}`);
-});
-
-// Manejo de señales para cierre graceful
-process.on('SIGTERM', () => {
-    console.log('🔄 Cerrando servidor...');
-    server.close(() => {
-        console.log('✅ Servidor cerrado');
-        process.exit(0);
+  async handleConnect(req, clientSocket, head) {
+    const targetUrl = req.url;
+    console.log(`🔗 CONNECT ${targetUrl} - ${req.socket.remoteAddress}`);
+    
+    // Verificar autenticación si está habilitada
+    if (this.auth.config.enabled) {
+      const isAuthenticated = await this.auth.authenticateProxy(req, { 
+        writeHead: (code, headers) => {
+          clientSocket.write(`HTTP/1.1 ${code} Proxy Authentication Required\r\n`);
+          Object.entries(headers || {}).forEach(([key, value]) => {
+            clientSocket.write(`${key}: ${value}\r\n`);
+          });
+          clientSocket.write('\r\n');
+        },
+        end: (data) => {
+          if (data) clientSocket.write(data);
+          clientSocket.end();
+        }
+      });
+      
+      if (!isAuthenticated) {
+        return; // La conexión ya fue cerrada por el sistema de auth
+      }
+    }
+    
+    // Para HTTPS, redirigir al puerto 443
+    const [hostname, port] = targetUrl.split(':');
+    const targetPort = port || config.proxy?.httpsRedirectPort || 443;
+    
+    // Crear conexión al servidor destino
+    const serverSocket = net.connect(targetPort, hostname, () => {
+      // Enviar respuesta de conexión establecida
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      
+      // Si hay datos en head, enviarlos
+      if (head && head.length > 0) {
+        serverSocket.write(head);
+      }
+      
+      // Crear túnel bidireccional
+      clientSocket.pipe(serverSocket);
+      serverSocket.pipe(clientSocket);
     });
+    
+    // Timeout para conexiones
+    serverSocket.setTimeout(config.server?.timeout || 30000);
+    clientSocket.setTimeout(config.server?.timeout || 30000);
+    
+    // Manejar errores
+    serverSocket.on('error', (err) => {
+      console.error(`❌ Error conectando a ${targetUrl}:`, err.message);
+      clientSocket.end();
+    });
+    
+    clientSocket.on('error', (err) => {
+      console.error(`❌ Error en cliente:`, err.message);
+      serverSocket.destroy();
+    });
+    
+    serverSocket.on('timeout', () => {
+      console.log(`⏰ Timeout conectando a ${targetUrl}`);
+      serverSocket.destroy();
+      clientSocket.end();
+    });
+  }
+
+  stop() {
+    if (this.server) {
+      this.server.close(() => {
+        console.log('🛑 Servidor detenido');
+      });
+    }
+  }
+}
+
+// Manejo de señales
+process.on('SIGINT', () => {
+  console.log('\n🛑 Cerrando servidor...');
+  if (global.proxy) {
+    global.proxy.stop();
+  }
+  process.exit(0);
 });
+
+process.on('SIGTERM', () => {
+  console.log('\n🛑 Cerrando servidor...');
+  if (global.proxy) {
+    global.proxy.stop();
+  }
+  process.exit(0);
+});
+
+// Iniciar si se ejecuta directamente
+if (require.main === module) {
+  console.log('🔄 Iniciando HTTP Proxy 101...');
+  global.proxy = new HttpProxy101();
+  global.proxy.start();
+}
+
+module.exports = HttpProxy101;
 EOF
 
     log_info "Creando config.json..."
     cat > "$PROJECT_DIR/config/config.json" << 'EOF'
 {
-    "port": 80,
+  "server": {
     "host": "0.0.0.0",
+    "port": 8080,
     "timeout": 30000,
-    "maxConnections": 1000
+    "mode": "proxy",
+    "auth": {
+      "enabled": true,
+      "method": "pam",
+      "realm": "HTTP Proxy 101",
+      "allowedUsers": [],
+      "failedAttempts": {
+        "maxAttempts": 3,
+        "blockDuration": 300000
+      }
+    },
+    "security": {
+      "helmet": true,
+      "cors": true,
+      "compression": true,
+      "rateLimit": {
+        "enabled": true,
+        "maxRequests": 100,
+        "windowMs": 60000
+      }
+    }
+  },
+  "proxy": {
+    "httpsRedirectPort": 443,
+    "responseCode": 101,
+    "responseMessage": "Switching Protocols",
+    "headers": {
+      "X-Proxy-Server": "HTTP-Proxy-101",
+      "X-Bypass-Mode": "active",
+      "Connection": "Upgrade",
+      "Upgrade": "HTTP/1.1"
+    }
+  },
+  "bypass": {
+    "enabled": true,
+    "methods": ["GET", "POST", "CONNECT", "OPTIONS"],
+    "logging": {
+      "enabled": true,
+      "level": "info",
+      "format": "combined"
+    }
+  },
+  "production": {
+    "host": "0.0.0.0",
+    "port": 80,
+    "user": "proxy",
+    "group": "proxy",
+    "pidFile": "/var/run/http-proxy-101.pid",
+    "logFile": "/var/log/http-proxy-101.log"
+  }
 }
 EOF
 
@@ -658,13 +1137,14 @@ install_node_dependencies() {
         return 1
     }
     
-    # Función simple para ejecutar npm con debug
+    # Función simple para ejecutar npm con timeout
     run_npm_install() {
         local cmd="$1"
         local desc="$2"
+        local timeout_seconds=120  # Timeout de 2 minutos
         
         log_info "$desc"
-        log_info "Ejecutando: $cmd"
+        log_info "Ejecutando: $cmd (timeout: ${timeout_seconds}s)"
         log_info "Directorio actual: $(pwd)"
         log_info "Usuario actual: $(whoami)"
         log_info "Node.js version: $(node --version 2>/dev/null || echo 'N/A')"
@@ -672,43 +1152,141 @@ install_node_dependencies() {
         
         # Verificar package.json antes de instalar
         if [[ -f package.json ]]; then
-            log_info "package.json encontrado, contenido:"
-            cat package.json | head -10
+            log_info "package.json encontrado"
         else
             log_error "package.json NO encontrado"
             return 1
         fi
         
-        # Ejecutar con output en tiempo real para diagnóstico
+        # Ejecutar con timeout
         log_info "Iniciando instalación de dependencias..."
-        if eval "$cmd"; then
+        
+        # Crear archivo temporal para capturar el PID
+        local pidfile="/tmp/npm_install_$$"
+        local logfile="/tmp/npm_install_log_$$"
+        
+        # Ejecutar npm en background
+        eval "$cmd" > "$logfile" 2>&1 &
+        local npm_pid=$!
+        echo $npm_pid > "$pidfile"
+        
+        # Función para mostrar progreso
+        local elapsed=0
+        while kill -0 $npm_pid 2>/dev/null; do
+            sleep 5
+            elapsed=$((elapsed + 5))
+            
+            if [[ $elapsed -ge $timeout_seconds ]]; then
+                log_warning "Timeout alcanzado (${timeout_seconds}s), terminando npm..."
+                kill -TERM $npm_pid 2>/dev/null || true
+                sleep 2
+                kill -KILL $npm_pid 2>/dev/null || true
+                wait $npm_pid 2>/dev/null || true
+                
+                log_error "$desc - TIMEOUT después de ${timeout_seconds} segundos"
+                
+                # Mostrar últimas líneas del log
+                if [[ -f "$logfile" ]]; then
+                    log_info "Últimas líneas del log de npm:"
+                    tail -10 "$logfile" 2>/dev/null || true
+                fi
+                
+                # Limpiar archivos temporales
+                rm -f "$pidfile" "$logfile" 2>/dev/null || true
+                return 1
+            fi
+            
+            # Mostrar progreso cada 15 segundos
+            if [[ $((elapsed % 15)) -eq 0 ]]; then
+                log_info "Instalación en progreso... (${elapsed}s transcurridos)"
+            fi
+        done
+        
+        # Esperar a que termine y obtener código de salida
+        wait $npm_pid
+        local exit_code=$?
+        
+        if [[ $exit_code -eq 0 ]]; then
             log_success "$desc - COMPLETADO"
             
             # Verificar que node_modules se creó
             if [[ -d "node_modules" ]]; then
                 log_success "Directorio node_modules creado correctamente"
-                log_info "Contenido de node_modules: $(ls -la node_modules/ 2>/dev/null | wc -l) elementos"
+                local module_count=$(ls -la node_modules/ 2>/dev/null | wc -l)
+                log_info "Contenido de node_modules: $module_count elementos"
             else
                 log_warning "node_modules no se creó"
             fi
+            
+            # Limpiar archivos temporales
+            rm -f "$pidfile" "$logfile" 2>/dev/null || true
             return 0
         else
-            local exit_code=$?
             log_error "$desc - FALLÓ (código: $exit_code)"
+            
+            # Mostrar log de error
+            if [[ -f "$logfile" ]]; then
+                log_info "=== LOG DE ERROR ==="
+                tail -20 "$logfile" 2>/dev/null || true
+            fi
             
             # Diagnóstico adicional en caso de error
             log_info "=== DIAGNÓSTICO POST-ERROR ==="
             log_info "Contenido del directorio:"
             ls -la . 2>/dev/null || true
-            log_info "Logs de npm (últimas 10 líneas):"
-            tail -10 ~/.npm/_logs/*.log 2>/dev/null || log_info "No hay logs de npm disponibles"
             
+            # Limpiar archivos temporales
+            rm -f "$pidfile" "$logfile" 2>/dev/null || true
             return 1
         fi
     }
     
+    # Función para verificar si se pueden compilar módulos nativos
+    check_native_build_capability() {
+        log_info "Verificando capacidad de compilación de módulos nativos..."
+        
+        # Verificar herramientas de compilación básicas
+        local build_tools_ok=true
+        
+        if ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then
+            log_warning "No se encontró compilador C (gcc/clang)"
+            build_tools_ok=false
+        fi
+        
+        if ! command -v make >/dev/null 2>&1; then
+            log_warning "No se encontró make"
+            build_tools_ok=false
+        fi
+        
+        if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+            log_warning "No se encontró Python (requerido para node-gyp)"
+            build_tools_ok=false
+        fi
+        
+        # Verificar headers de PAM
+        if [[ ! -f /usr/include/security/pam_appl.h ]] && [[ ! -f /usr/include/pam/pam_appl.h ]]; then
+            log_warning "Headers de PAM no encontrados (libpam0g-dev)"
+            build_tools_ok=false
+        fi
+        
+        if $build_tools_ok; then
+            log_success "Sistema tiene capacidad para compilar módulos nativos"
+            return 0
+        else
+            log_warning "Sistema no tiene todas las herramientas para compilar módulos nativos"
+            log_info "Para habilitar PAM, instala: sudo apt-get install build-essential libpam0g-dev python3"
+            return 1
+        fi
+    }
+
     # Aplicar correcciones si es necesario
     fix_snap_nodejs_issues
+    
+    # Verificar capacidad de compilación
+    local can_build_native=false
+    if check_native_build_capability; then
+        can_build_native=true
+    fi
     
     # Verificar que npm está disponible
     if ! command -v npm >/dev/null 2>&1; then
@@ -744,28 +1322,55 @@ install_node_dependencies() {
     # Cambiar propietario del directorio antes de instalar
     chown -R $USER:$USER "$PROJECT_DIR"
     
-    # Método 1: Instalación directa sin sudo
-    log_info "Método 1: Instalación directa de dependencias..."
-    if run_npm_install "npm install --production --no-optional --no-audit --no-fund" "Instalación estándar"; then
+    # Método 1: Instalación básica sin dependencias problemáticas
+    log_info "Método 1: Instalación de dependencias básicas..."
+    local basic_packages="express cors helmet compression basic-auth"
+    if run_npm_install "npm install $basic_packages --production --no-optional --no-audit --no-fund" "Instalación básica"; then
         # Verificar que se instalaron correctamente
         if [[ -d "node_modules" ]]; then
-            log_success "Dependencias Node.js instaladas correctamente"
+            log_success "Dependencias básicas instaladas correctamente"
+            
+            # Intentar instalar authenticate-pam por separado (solo si se puede compilar)
+            if $can_build_native; then
+                log_info "Intentando instalar authenticate-pam (módulo nativo)..."
+                if run_npm_install "npm install authenticate-pam --production --no-optional --no-audit --no-fund" "Instalación PAM (opcional)"; then
+                    log_success "authenticate-pam instalado correctamente"
+                else
+                    log_warning "authenticate-pam falló, continuando sin PAM"
+                    # Crear un stub para authenticate-pam
+                    mkdir -p node_modules/authenticate-pam
+                    echo '{"name":"authenticate-pam","version":"0.0.0","main":"index.js"}' > node_modules/authenticate-pam/package.json
+                    echo 'module.exports = { authenticate: (u,p,cb) => cb(new Error("PAM no disponible")) };' > node_modules/authenticate-pam/index.js
+                fi
+            else
+                log_warning "Omitiendo authenticate-pam (herramientas de compilación no disponibles)"
+                # Crear un stub para authenticate-pam
+                mkdir -p node_modules/authenticate-pam
+                echo '{"name":"authenticate-pam","version":"0.0.0","main":"index.js"}' > node_modules/authenticate-pam/package.json
+                echo 'module.exports = { authenticate: (u,p,cb) => cb(new Error("PAM no disponible")) };' > node_modules/authenticate-pam/index.js
+            fi
             return 0
         fi
     fi
     
     # Método 2: Instalación con usuario específico
     log_warning "Método 1 falló, intentando como usuario $USER..."
-    if run_npm_install "sudo -u $USER npm install --production --no-optional --no-audit --no-fund" "Instalación como usuario"; then
+    if run_npm_install "sudo -u $USER npm install $basic_packages --production --no-optional --no-audit --no-fund" "Instalación como usuario"; then
         if [[ -d "node_modules" ]]; then
-            log_success "Dependencias instaladas como usuario"
+            log_success "Dependencias básicas instaladas como usuario"
+            # Intentar PAM opcional solo si se puede compilar
+            if $can_build_native; then
+                sudo -u $USER npm install authenticate-pam --production --no-optional --no-audit --no-fund 2>/dev/null || log_warning "authenticate-pam no instalado"
+            else
+                log_warning "Omitiendo authenticate-pam (herramientas de compilación no disponibles)"
+            fi
             return 0
         fi
     fi
     
-    # Método 3: Instalación manual una por una
+    # Método 3: Instalación manual una por una (sin PAM primero)
     log_warning "Método 2 falló, instalando dependencias una por una..."
-    local packages=("express" "cors" "helmet" "compression")
+    local packages=("express" "cors" "helmet" "compression" "basic-auth")
     local all_success=true
     
     for package in "${packages[@]}"; do
@@ -779,23 +1384,44 @@ install_node_dependencies() {
     done
     
     if $all_success && [[ -d "node_modules" ]]; then
-        log_success "Todas las dependencias instaladas individualmente"
+        log_success "Dependencias básicas instaladas individualmente"
+        
+        # Intentar authenticate-pam al final solo si se puede compilar
+        if $can_build_native; then
+            log_info "Intentando authenticate-pam individualmente..."
+            run_npm_install "npm install authenticate-pam --production --no-optional --no-audit --no-fund" "Instalando authenticate-pam" || log_warning "authenticate-pam no instalado"
+        else
+            log_warning "Omitiendo authenticate-pam (herramientas de compilación no disponibles)"
+        fi
+        
         return 0
     fi
     
-    # Método 4: Instalación con npm global
+    # Método 4: Instalación con npm global (solo básicas)
     log_warning "Método 3 falló, intentando instalación global..."
-    if run_npm_install "npm install -g express cors helmet compression" "Instalación global"; then
+    local global_packages="express cors helmet compression basic-auth"
+    if run_npm_install "npm install -g $global_packages" "Instalación global"; then
         # Crear enlaces simbólicos
         mkdir -p node_modules
-        for package in express cors helmet compression; do
+        for package in express cors helmet compression basic-auth; do
             if [[ -d "/usr/lib/node_modules/$package" ]]; then
                 ln -sf "/usr/lib/node_modules/$package" "node_modules/$package" 2>/dev/null || true
+            elif [[ -d "/usr/local/lib/node_modules/$package" ]]; then
+                ln -sf "/usr/local/lib/node_modules/$package" "node_modules/$package" 2>/dev/null || true
             fi
         done
         
         if [[ -d "node_modules/express" ]]; then
-            log_success "Dependencias instaladas globalmente y enlazadas"
+            log_success "Dependencias básicas instaladas globalmente y enlazadas"
+            
+            # Crear stub para authenticate-pam si no existe
+            if [[ ! -d "node_modules/authenticate-pam" ]]; then
+                mkdir -p node_modules/authenticate-pam
+                echo '{"name":"authenticate-pam","version":"0.0.0","main":"index.js"}' > node_modules/authenticate-pam/package.json
+                echo 'module.exports = { authenticate: (u,p,cb) => cb(new Error("PAM no disponible")) };' > node_modules/authenticate-pam/index.js
+                log_warning "authenticate-pam stub creado (PAM no disponible)"
+            fi
+            
             return 0
         fi
     fi
